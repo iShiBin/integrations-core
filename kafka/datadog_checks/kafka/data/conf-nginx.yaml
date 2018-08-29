@@ -11,7 +11,7 @@ instances:
     tags:
       kafka: broker
       app: kafka
-      team: ops
+      owner: ops
       # env: [stg|prd|dev|tst|ops]
       # newTag: test
     # user: username
