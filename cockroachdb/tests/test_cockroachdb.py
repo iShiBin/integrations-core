@@ -5,7 +5,8 @@ from datadog_checks.cockroachdb import CockroachdbCheck
 
 
 def test_check(aggregator, instance):
-    check = CockroachdbCheck('cockroachdb', {}, {})
+    check = CockroachdbCheck('cockroachdb', {}, {}, [instance])
     check.check(instance)
+    raise Exception('{}'.format(len(aggregator._metrics)))
 
     aggregator.assert_all_metrics_covered()
