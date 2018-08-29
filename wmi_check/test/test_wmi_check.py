@@ -10,6 +10,7 @@ from mock import Mock
 from nose.plugins.attrib import attr
 
 # project
+from datadog_checks.stubs import aggregator
 from tests.checks.common import AgentCheckTest
 from tests.core.test_wmi import SWbemServices, TestCommonWMI
 

@@ -29,14 +29,6 @@ from ..utils.proxy import config_proxy_skip
 from ..utils.limiter import Limiter
 
 
-# Metric types for which it's only useful to submit once per context
-ONE_PER_CONTEXT_METRIC_TYPES = [
-    aggregator.GAUGE,
-    aggregator.RATE,
-    aggregator.MONOTONIC_COUNT,
-]
-
-
 class AgentCheck(object):
     """
     The base class for any Agent based integrations
@@ -54,6 +46,13 @@ class AgentCheck(object):
     See https://github.com/DataDog/integrations-core/pull/2093 for more information
     """
     DEFAULT_METRIC_LIMIT = 0
+
+    # Metric types for which it's only useful to submit once per context
+    ONE_PER_CONTEXT_METRIC_TYPES = [
+        aggregator.GAUGE,
+        aggregator.RATE,
+        aggregator.MONOTONIC_COUNT,
+    ]
 
     def __init__(self, *args, **kwargs):
         """
@@ -165,7 +164,7 @@ class AgentCheck(object):
             hostname = b''
 
         if self.metric_limiter:
-            if mtype in ONE_PER_CONTEXT_METRIC_TYPES:
+            if mtype in self.ONE_PER_CONTEXT_METRIC_TYPES:
                 # Fast path for gauges, rates, monotonic counters, assume one context per call
                 if self.metric_limiter.is_reached():
                     return
