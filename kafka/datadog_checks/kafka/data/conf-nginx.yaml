@@ -10,7 +10,9 @@ instances:
     port: 9999 # This is the JMX port on which Kafka exposes its metrics (usually 9999)
     tags:
       kafka: broker
-      # env: stage
+      app: kafka
+      team: ops
+      # env: [stg|prd|dev|tst|ops]
       # newTag: test
     # user: username
     # password: password
