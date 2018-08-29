@@ -235,7 +235,7 @@ class KubernetesState(OpenMetricsBaseCheck):
 
         return instance
 
-    def _condition_to_service_check(self, metric, sc_name, mapping, tags=None):
+    def _condition_to_service_check(self, sample, sc_name, mapping, tags=None):
         """
         Some metrics contains conditions, labels that have "condition" as name and "true", "false", or "unknown"
         as value. The metric value is expected to be a gauge equal to 0 or 1 in this case.
@@ -251,16 +251,16 @@ class KubernetesState(OpenMetricsBaseCheck):
         This function evaluates metrics containing conditions and sends a service check
         based on a provided condition->check mapping dict
         """
-        if bool(metric.gauge.value) is False:
+        if bool(sample[self.SAMPLE_VALUE]) is False:
             return  # Ignore if gauge is not 1
-        for label in metric.label:
-            if label.name == 'condition':
-                if label.value in mapping:
-                    self.service_check(sc_name, mapping[label.value], tags=tags)
-                else:
-                    self.log.debug("Unable to handle %s - unknown condition %s" % (sc_name, label.value))
+        if 'condition' in sample[self.SAMPLE_LABELS]:
+            if sample[self.SAMPLE_LABELS]['condition'] in mapping:
+                self.service_check(sc_name, mapping[sample[self.SAMPLE_LABELS]['condition']], tags=tags)
+            else:
+                self.log.debug("Unable to handle %s - unknown condition %s"
+                               % (sc_name, sample[self.SAMPLE_LABELS]['condition']))
 
-    def _condition_to_tag_check(self, metric, base_sc_name, mapping, scraper_config, tags=None):
+    def _condition_to_tag_check(self, sample, base_sc_name, mapping, scraper_config, tags=None):
         """
         Metrics from kube-state-metrics have changed
         For example:
@@ -276,20 +276,20 @@ class KubernetesState(OpenMetricsBaseCheck):
         This function evaluates metrics containing conditions and sends a service check
         based on a provided condition->check mapping dict
         """
-        if bool(metric.gauge.value) is False:
+        if bool(sample[self.SAMPLE_VALUE]) is False:
             return  # Ignore if gauge is not 1 and we are not processing the pod phase check
 
-        label_value, condition_map = self._get_metric_condition_map(base_sc_name, metric.label)
+        label_value, condition_map = self._get_metric_condition_map(base_sc_name, sample[self.SAMPLE_LABELS])
         service_check_name = condition_map['service_check_name']
         mapping = condition_map['mapping']
 
         if base_sc_name == 'kubernetes_state.pod.phase':
-            pod = self._label_to_tag('pod', metric.label, scraper_config)
-            phase = self._label_to_tag('phase', metric.label, scraper_config)
+            pod = self._label_to_tag('pod', sample[self.SAMPLE_LABELS], scraper_config)
+            phase = self._label_to_tag('phase', sample[self.SAMPLE_LABELS], scraper_config)
             message = "{} is currently reporting {}".format(pod, phase)
         else:
-            node = self._label_to_tag('node', metric.label, scraper_config)
-            condition = self._label_to_tag('condition', metric.label, scraper_config)
+            node = self._label_to_tag('node', sample[self.SAMPLE_LABELS], scraper_config)
+            condition = self._label_to_tag('condition', sample[self.SAMPLE_LABELS], scraper_config)
             message = "{} is currently reporting {}".format(node, condition)
 
         if condition_map['service_check_name'] is None:
@@ -322,24 +322,10 @@ class KubernetesState(OpenMetricsBaseCheck):
                     'mapping': self.condition_to_status_negative
                 }
             }
-            label_value = self._extract_label_value('status', labels)
-            return label_value, switch.get(self._extract_label_value('condition', labels),
-                                           {'service_check_name': None, 'mapping': None})
+            return labels['status'], switch.get(labels['condition'], {'service_check_name': None, 'mapping': None})
 
         elif base_sc_name == 'kubernetes_state.pod.phase':
-            label_value = self._extract_label_value('phase', labels)
-            return label_value, {'service_check_name': base_sc_name, 'mapping': self.pod_phase_to_status}
-
-    def _extract_label_value(self, name, labels):
-        """
-        Search for `name` in labels name and returns
-        corresponding value.
-        Returns None if name was not found.
-        """
-        for label in labels:
-            if label.name == name:
-                return label.value
-        return None
+            return labels['phase'], {'service_check_name': base_sc_name, 'mapping': self.pod_phase_to_status}
 
     def _format_tag(self, name, value, scraper_config):
         """
@@ -354,7 +340,7 @@ class KubernetesState(OpenMetricsBaseCheck):
         Tag name is label name if not specified.
         Returns None if name was not found.
         """
-        value = self._extract_label_value(name, labels)
+        value = labels[name]
         if value:
             return self._format_tag(tag_name or name, value, scraper_config)
         else:
@@ -372,7 +358,7 @@ class KubernetesState(OpenMetricsBaseCheck):
     # From the phase the check will update its status
     # Also submits as an aggregated count with minimal tags so it is
     # visualisable over time per namespace and phase
-    def kube_pod_status_phase(self, message, scraper_config):
+    def kube_pod_status_phase(self, metric, scraper_config):
         """ Phase a pod is in. """
         metric_name = scraper_config['namespace'] + '.pod.status_phase'
         # Will submit a service check which status is given by its phase.
@@ -380,216 +366,217 @@ class KubernetesState(OpenMetricsBaseCheck):
         check_basename = scraper_config['namespace'] + '.pod.phase'
         status_phase_counter = Counter()
 
-        for metric in message.metric:
-            pod_tag = self._label_to_tag("pod", metric.label, scraper_config)
-            namespace_tag = self._label_to_tag("namespace", metric.label, scraper_config)
-            self._condition_to_tag_check(metric, check_basename, self.pod_phase_to_status, scraper_config,
+        for sample in metric.samples:
+            pod_tag = self._label_to_tag("pod", sample[self.SAMPLE_LABELS], scraper_config)
+            namespace_tag = self._label_to_tag("namespace", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_tag_check(sample, check_basename, self.pod_phase_to_status, scraper_config,
                                          tags=[pod_tag, namespace_tag] + scraper_config['custom_tags'])
 
             # Counts aggregated cluster-wide to avoid no-data issues on pod churn,
             # pod granularity available in the service checks
             tags = [
-                self._label_to_tag("namespace", metric.label, scraper_config),
-                self._label_to_tag("phase", metric.label, scraper_config)
+                self._label_to_tag("namespace", sample[self.SAMPLE_LABELS], scraper_config),
+                self._label_to_tag("phase", sample[self.SAMPLE_LABELS], scraper_config)
             ] + scraper_config['custom_tags']
-            status_phase_counter[tuple(sorted(tags))] += metric.gauge.value
+            status_phase_counter[tuple(sorted(tags))] += sample[self.SAMPLE_VALUE]
 
         for tags, count in status_phase_counter.iteritems():
             self.gauge(metric_name, count, tags=list(tags))
 
-    def kube_pod_container_status_waiting_reason(self, message, scraper_config):
+    def kube_pod_container_status_waiting_reason(self, metric, scraper_config):
         metric_name = scraper_config['namespace'] + '.container.status_report.count.waiting'
-        for metric in message.metric:
+        for sample in metric.samples:
             tags = []
             skip_metric = False
-            for label in metric.label:
-                if label.name == "reason":
-                    if label.value.lower() in WHITELISTED_WAITING_REASONS:
-                        tags.append(self._format_tag(label.name, label.value, scraper_config))
-                    else:
-                        skip_metric = True
-                elif label.name == "container":
-                    tags.append(self._format_tag("kube_container_name", label.value, scraper_config))
-                elif label.name == "namespace":
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
+            if "reason" in sample[self.SAMPLE_LABELS]:
+                if sample[self.SAMPLE_LABELS]["reason"].lower() in WHITELISTED_WAITING_REASONS:
+                    tags.append(self._format_tag("reason", sample[self.SAMPLE_LABELS]["reason"], scraper_config))
+                else:
+                    skip_metric = True
+            elif "container" in sample[self.SAMPLE_LABELS]:
+                tags.append(self._format_tag("kube_container_name", sample[self.SAMPLE_LABELS]["container"],
+                            scraper_config))
+            elif "namespace" in sample[self.SAMPLE_LABELS]:
+                tags.append(self._format_tag("namespace", sample[self.SAMPLE_LABELS]["namespace"], scraper_config))
             if not skip_metric:
-                self.count(metric_name, metric.gauge.value, tags + scraper_config['custom_tags'])
+                self.count(metric_name, sample[self.SAMPLE_VALUE], tags + scraper_config['custom_tags'])
 
-    def kube_pod_container_status_terminated_reason(self, message, scraper_config):
+    def kube_pod_container_status_terminated_reason(self, metric, scraper_config):
         metric_name = scraper_config['namespace'] + '.container.status_report.count.terminated'
-        for metric in message.metric:
+        for sample in metric.samples:
             tags = []
             skip_metric = False
-            for label in metric.label:
-                if label.name == "reason":
-                    if label.value.lower() in WHITELISTED_TERMINATED_REASONS:
-                        tags.append(self._format_tag(label.name, label.value, scraper_config))
-                    else:
-                        skip_metric = True
-                elif label.name == "container":
-                    tags.append(self._format_tag("kube_container_name", label.value, scraper_config))
-                elif label.name == "namespace":
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
+            if "reason" in sample[self.SAMPLE_LABELS]:
+                if sample[self.SAMPLE_LABELS]["reason"].lower() in WHITELISTED_TERMINATED_REASONS:
+                    tags.append(self._format_tag("reason", sample[self.SAMPLE_LABELS]["reason"], scraper_config))
+                else:
+                    skip_metric = True
+            elif "container" in sample[self.SAMPLE_LABELS]:
+                tags.append(self._format_tag("kube_container_name", sample[self.SAMPLE_LABELS]["container"],
+                            scraper_config))
+            elif "namespace" in sample[self.SAMPLE_LABELS]:
+                tags.append(self._format_tag("namespace", sample[self.SAMPLE_LABELS]["namespace"], scraper_config))
             if not skip_metric:
-                self.count(metric_name, metric.gauge.value, tags + scraper_config['custom_tags'])
+                self.count(metric_name, sample[self.SAMPLE_VALUE], tags + scraper_config['custom_tags'])
 
-    def kube_cronjob_next_schedule_time(self, message, scraper_config):
+    def kube_cronjob_next_schedule_time(self, metric, scraper_config):
         """ Time until the next schedule """
         # Used as a service check so that one can be alerted if the cronjob's next schedule is in the past
         check_basename = scraper_config['namespace'] + '.cronjob.on_schedule_check'
         curr_time = int(time.time())
-        for metric in message.metric:
-            on_schedule = int(metric.gauge.value) - curr_time
-            tags = [self._format_tag(label.name, label.value, scraper_config) for label in metric.label]
+        for sample in metric.samples:
+            on_schedule = int(sample[self.SAMPLE_VALUE]) - curr_time
+            tags = [self._format_tag(label_name, label_value, scraper_config)
+                    for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems()]
             tags += scraper_config['custom_tags']
             if on_schedule < 0:
                 message = "The service check scheduled at {} is {} seconds late".format(
-                    time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(int(metric.gauge.value))), on_schedule
+                    time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(int(sample[self.SAMPLE_VALUE]))), on_schedule
                 )
                 self.service_check(check_basename, self.CRITICAL, tags=tags, message=message)
             else:
                 self.service_check(check_basename, self.OK, tags=tags)
 
-    def kube_job_complete(self, message, scraper_config):
+    def kube_job_complete(self, metric, scraper_config):
         service_check_name = scraper_config['namespace'] + '.job.complete'
-        for metric in message.metric:
+        for sample in metric.samples:
             tags = []
-            for label in metric.label:
-                if label.name == 'job':
-                    trimmed_job = self._trim_job_tag(label.value)
-                    tags.append(self._format_tag(label.name, trimmed_job, scraper_config))
+            for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems():
+                if label_name == 'job':
+                    trimmed_job = self._trim_job_tag(label_value)
+                    tags.append(self._format_tag(label_name, trimmed_job, scraper_config))
                 else:
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
+                    tags.append(self._format_tag(label_name, label_value, scraper_config))
             self.service_check(service_check_name, self.OK, tags=tags + scraper_config['custom_tags'])
 
-    def kube_job_failed(self, message, scraper_config):
+    def kube_job_failed(self, metric, scraper_config):
         service_check_name = scraper_config['namespace'] + '.job.complete'
-        for metric in message.metric:
+        for sample in metric.samples:
             tags = []
-            for label in metric.label:
-                if label.name == 'job':
-                    trimmed_job = self._trim_job_tag(label.value)
-                    tags.append(self._format_tag(label.name, trimmed_job, scraper_config))
+            for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems():
+                if label_name == 'job':
+                    trimmed_job = self._trim_job_tag(label_value)
+                    tags.append(self._format_tag(label_name, trimmed_job, scraper_config))
                 else:
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
+                    tags.append(self._format_tag(label_name, label_value, scraper_config))
             self.service_check(service_check_name, self.CRITICAL, tags=tags + scraper_config['custom_tags'])
 
-    def kube_job_status_failed(self, message, scraper_config):
-        for metric in message.metric:
+    def kube_job_status_failed(self, metric, scraper_config):
+        for sample in metric.samples:
             tags = [] + scraper_config['custom_tags']
-            for label in metric.label:
-                if label.name == 'job':
-                    trimmed_job = self._trim_job_tag(label.value)
-                    tags.append(self._format_tag(label.name, trimmed_job, scraper_config))
+            for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems():
+                if label_name == 'job':
+                    trimmed_job = self._trim_job_tag(label_value)
+                    tags.append(self._format_tag(label_name, trimmed_job, scraper_config))
                 else:
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
-            self.job_failed_count[frozenset(tags)] += metric.gauge.value
+                    tags.append(self._format_tag(label_name, label_value, scraper_config))
+            self.job_failed_count[frozenset(tags)] += sample[self.SAMPLE_VALUE]
 
-    def kube_job_status_succeeded(self, message, scraper_config):
-        for metric in message.metric:
+    def kube_job_status_succeeded(self, metric, scraper_config):
+        for sample in metric.samples:
             tags = [] + scraper_config['custom_tags']
-            for label in metric.label:
-                if label.name == 'job':
-                    trimmed_job = self._trim_job_tag(label.value)
-                    tags.append(self._format_tag(label.name, trimmed_job, scraper_config))
+            for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems():
+                if label_name == 'job':
+                    trimmed_job = self._trim_job_tag(label_value)
+                    tags.append(self._format_tag(label_name, trimmed_job, scraper_config))
                 else:
-                    tags.append(self._format_tag(label.name, label.value, scraper_config))
-            self.job_succeeded_count[frozenset(tags)] += metric.gauge.value
+                    tags.append(self._format_tag(label_name, label_value, scraper_config))
+            self.job_succeeded_count[frozenset(tags)] += sample[self.SAMPLE_VALUE]
 
-    def kube_node_status_condition(self, message, scraper_config):
+    def kube_node_status_condition(self, metric, scraper_config):
         """ The ready status of a cluster node. v1.0+"""
         base_check_name = scraper_config['namespace'] + '.node'
         metric_name = scraper_config['namespace'] + '.nodes.by_condition'
         by_condition_counter = Counter()
 
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_tag_check(metric, base_check_name, self.condition_to_status_positive, scraper_config,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_tag_check(sample, base_check_name, self.condition_to_status_positive, scraper_config,
                                          tags=[node_tag] + scraper_config['custom_tags'])
 
             # Counts aggregated cluster-wide to avoid no-data issues on node churn,
             # node granularity available in the service checks
             tags = [
-                self._label_to_tag("condition", metric.label, scraper_config),
-                self._label_to_tag("status", metric.label, scraper_config)
+                self._label_to_tag("condition", sample[self.SAMPLE_LABELS], scraper_config),
+                self._label_to_tag("status", sample[self.SAMPLE_LABELS], scraper_config)
             ] + scraper_config['custom_tags']
-            by_condition_counter[tuple(sorted(tags))] += metric.gauge.value
+            by_condition_counter[tuple(sorted(tags))] += sample[self.SAMPLE_VALUE]
 
         for tags, count in by_condition_counter.iteritems():
             self.gauge(metric_name, count, tags=list(tags))
 
-    def kube_node_status_ready(self, message, scraper_config):
+    def kube_node_status_ready(self, metric, scraper_config):
         """ The ready status of a cluster node (legacy)"""
         service_check_name = scraper_config['namespace'] + '.node.ready'
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_service_check(metric, service_check_name, self.condition_to_status_positive,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_service_check(sample, service_check_name, self.condition_to_status_positive,
                                              tags=[node_tag] + scraper_config['custom_tags'])
 
-    def kube_node_status_out_of_disk(self, message, scraper_config):
+    def kube_node_status_out_of_disk(self, metric, scraper_config):
         """ Whether the node is out of disk space (legacy)"""
         service_check_name = scraper_config['namespace'] + '.node.out_of_disk'
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_service_check(metric, service_check_name, self.condition_to_status_negative,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_service_check(sample, service_check_name, self.condition_to_status_negative,
                                              tags=[node_tag] + scraper_config['custom_tags'])
 
-    def kube_node_status_memory_pressure(self, message, scraper_config):
+    def kube_node_status_memory_pressure(self, metric, scraper_config):
         """ Whether the node is in a memory pressure state (legacy)"""
         service_check_name = scraper_config['namespace'] + '.node.memory_pressure'
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_service_check(metric, service_check_name, self.condition_to_status_negative,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_service_check(sample, service_check_name, self.condition_to_status_negative,
                                              tags=[node_tag] + scraper_config['custom_tags'])
 
-    def kube_node_status_disk_pressure(self, message, scraper_config):
+    def kube_node_status_disk_pressure(self, metric, scraper_config):
         """ Whether the node is in a disk pressure state (legacy)"""
         service_check_name = scraper_config['namespace'] + '.node.disk_pressure'
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_service_check(metric, service_check_name, self.condition_to_status_negative,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_service_check(sample, service_check_name, self.condition_to_status_negative,
                                              tags=[node_tag] + scraper_config['custom_tags'])
 
-    def kube_node_status_network_unavailable(self, message, scraper_config):
+    def kube_node_status_network_unavailable(self, metric, scraper_config):
         """ Whether the node is in a network unavailable state (legacy)"""
         service_check_name = scraper_config['namespace'] + '.node.network_unavailable'
-        for metric in message.metric:
-            node_tag = self._label_to_tag("node", metric.label, scraper_config)
-            self._condition_to_service_check(metric, service_check_name, self.condition_to_status_negative,
+        for sample in metric.samples:
+            node_tag = self._label_to_tag("node", sample[self.SAMPLE_LABELS], scraper_config)
+            self._condition_to_service_check(sample, service_check_name, self.condition_to_status_negative,
                                              tags=[node_tag] + scraper_config['custom_tags'])
 
-    def kube_node_spec_unschedulable(self, message, scraper_config):
+    def kube_node_spec_unschedulable(self, metric, scraper_config):
         """ Whether a node can schedule new pods. """
         metric_name = scraper_config['namespace'] + '.node.status'
         statuses = ('schedulable', 'unschedulable')
-        if message.type < len(METRIC_TYPES):
-            for metric in message.metric:
-                tags = [self._format_tag(label.name, label.value, scraper_config) for label in metric.label]
+        if metric.type in METRIC_TYPES:
+            for sample in metric.samples:
+                tags = [self._format_tag(label_name, label_value, scraper_config)
+                        for label_name, label_value in sample[self.SAMPLE_LABELS].iteritems()]
                 tags += scraper_config['custom_tags']
-                status = statuses[int(getattr(metric, METRIC_TYPES[message.type]).value)]  # value can be 0 or 1
+                status = statuses[int(sample[self.SAMPLE_VALUE])]  # value can be 0 or 1
                 tags.append(self._format_tag('status', status, scraper_config))
                 self.gauge(metric_name, 1, tags)  # metric value is always one, value is on the tags
         else:
-            self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
+            self.log.error("Metric type %s unsupported for metric %s" % (metric.type, metric.name))
 
-    def kube_resourcequota(self, message, scraper_config):
+    def kube_resourcequota(self, metric, scraper_config):
         """ Quota and current usage by resource type. """
         metric_base_name = scraper_config['namespace'] + '.resourcequota.{}.{}'
         suffixes = {'used': 'used', 'hard': 'limit'}
-        if message.type < len(METRIC_TYPES):
-            for metric in message.metric:
-                mtype = self._extract_label_value("type", metric.label)
-                resource = self._extract_label_value("resource", metric.label)
+        if metric.type in METRIC_TYPES:
+            for sample in metric.samples:
+                mtype = self._extract_label_value("type", sample[self.SAMPLE_LABELS])
+                resource = self._extract_label_value("resource", sample[self.SAMPLE_LABELS])
                 tags = [
-                    self._label_to_tag("namespace", metric.label, scraper_config),
-                    self._label_to_tag("resourcequota", metric.label, scraper_config)
+                    self._label_to_tag("namespace", sample[self.SAMPLE_LABELS], scraper_config),
+                    self._label_to_tag("resourcequota", sample[self.SAMPLE_LABELS], scraper_config)
                 ] + scraper_config['custom_tags']
-                val = getattr(metric, METRIC_TYPES[message.type]).value
-                self.gauge(metric_base_name.format(resource, suffixes[mtype]), val, tags)
+                self.gauge(metric_base_name.format(resource, suffixes[mtype]), sample[self.SAMPLE_VALUE], tags)
         else:
-            self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
+            self.log.error("Metric type %s unsupported for metric %s" % (metric.type, metric.name))
 
-    def kube_limitrange(self, message, scraper_config):
+    def kube_limitrange(self, metric, scraper_config):
         """ Resource limits by consumer type. """
         # type's cardinality's low: https://github.com/kubernetes/kubernetes/blob/v1.6.1/pkg/api/v1/types.go#L3872-L3879
         # idem for resource: https://github.com/kubernetes/kubernetes/blob/v1.6.1/pkg/api/v1/types.go#L3342-L3352
@@ -603,21 +590,20 @@ class KubernetesState(OpenMetricsBaseCheck):
             'maxLimitRequestRatio': 'max_limit_request_ratio',
         }
 
-        if message.type < len(METRIC_TYPES):
-            for metric in message.metric:
-                constraint = self._extract_label_value('constraint', metric.label)
+        if metric.type in METRIC_TYPES:
+            for sample in metric.samples:
+                constraint = sample[self.SAMPLE_LABELS].get("constraint")
                 if constraint in constraints:
                     constraint = constraints[constraint]
                 else:
-                    self.error("Constraint %s unsupported for metric %s" % (constraint, message.name))
+                    self.error("Constraint %s unsupported for metric %s" % (constraint, metric.name))
                     continue
-                resource = self._extract_label_value("resource", metric.label)
+                resource = self._extract_label_value("resource", sample[self.SAMPLE_LABELS])
                 tags = [
-                    self._label_to_tag("namespace", metric.label, scraper_config),
-                    self._label_to_tag("limitrange", metric.label, scraper_config),
-                    self._label_to_tag("type", metric.label, scraper_config, tag_name="consumer_type")
+                    self._label_to_tag("namespace", sample[self.SAMPLE_LABELS], scraper_config),
+                    self._label_to_tag("limitrange", sample[self.SAMPLE_LABELS], scraper_config),
+                    self._label_to_tag("type", sample[self.SAMPLE_LABELS], scraper_config, tag_name="consumer_type")
                 ] + scraper_config['custom_tags']
-                val = getattr(metric, METRIC_TYPES[message.type]).value
-                self.gauge(metric_base_name.format(resource, constraint), val, tags)
+                self.gauge(metric_base_name.format(resource, constraint), sample[self.SAMPLE_VALUE], tags)
         else:
-            self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
+            self.log.error("Metric type %s unsupported for metric %s" % (metric.type, metric.name))
