@@ -3,7 +3,6 @@ init_config:
 instances:
   # No configuration is needed for this check. However, you can add tags.
   # A single instance needs to be defined with any value.
-  - foo: bar
-    tags:
+  - tags:
       app: kafka
       owner: ops
